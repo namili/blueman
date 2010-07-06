@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <_vendor>The Blueman Project</_vendor>
+  <vendor_url>http://blueman-project.org</vendor_url>
+  <icon_name>blueman</icon_name>
+  
+   <action id="org.blueman.network.setup">
+    <_description>Configure Bluetooth Network</_description>
+    <_message>Configuring networking requires privileges</_message>
+
+    <defaults>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+
+    </defaults>
+  </action>
+  
+  <action id="org.blueman.hal.manager">
+    <_description>Configure Bluetooth Modems</_description>
+    <_message>System policy prevents modifying the configuration</_message>
+
+    <defaults>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+  
+  <action id="org.blueman.dhcp.client">
+    <_description>Launch DHCP client</_description>
+    <_message>Launching DHCP client requires privileges</_message>
+    <defaults>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

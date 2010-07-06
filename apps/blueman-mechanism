@@ -1,0 +1,288 @@
+#!/usr/bin/python 
+import sys
+import os
+
+timeout = 30
+#support running uninstalled
+_dirname = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if os.path.exists(os.path.join(_dirname,"ChangeLog")):
+	sys.path.insert(0, _dirname)
+	timeout = 9999
+	
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+import blueman.Functions
+import __builtin__
+
+import gobject
+import syslog
+
+import subprocess
+import re
+from signal import SIGKILL
+
+loop = gobject.MainLoop()
+
+from blueman.main.NetConf import *
+	
+from blueman.Lib import set_probe_debug
+
+from blueman.Constants import POLKIT
+
+class Tee(object):
+	def __init__(self):
+		self.stdout = sys.stdout
+		self.stderr = sys.stderr
+		sys.stdout = self
+		sys.stderr = self
+		self.buffer = ""
+	def __del__(self):
+		sys.stdout = self.stdout
+		sys.stderr = self.stderr
+	def write(self, data):
+		self.buffer+=data
+		if self.buffer.endswith("\n"):
+			self.stdout.write(self.buffer)
+			if self.buffer != "\n":
+				syslog.syslog(self.buffer)
+			self.buffer = ""
+
+
+syslog.openlog("blueman-mechanism", 0, syslog.LOG_DAEMON)
+a = Tee()
+
+def prnt(*args):
+	s = ""
+	for a in args:
+		s += (str(a) + " ")
+	print s
+	
+__builtin__.dprint = prnt
+
+dprint("Starting blueman-mechanism")
+
+DBusGMainLoop(set_as_default=True)
+
+if "--debug" in sys.argv:
+	dprint("Enabled verbose output")
+	set_probe_debug(True)
+
+os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+dhcp_pids = []
+
+class Timer:
+	def __init__(self):
+		self.time = 0
+		self.stopped = False
+		gobject.timeout_add(1000, self.tick)
+	
+	def tick(self):
+		if not self.stopped:
+			self.time+=1
+			if self.time == timeout:
+				dprint("Exiting")
+				loop.quit()
+
+		return True
+			
+	def reset(self):
+		self.time = 0
+		
+	def stop(self):
+		self.stopped = True
+		
+	def resume(self):
+		self.stopped = False
+		self.reset()
+		
+timer = Timer()
+		
+class conf_service(dbus.service.Object):
+	def __init__(self):
+
+		self.bus = dbus.SystemBus();
+		self.bus.request_name("org.blueman.Mechanism")
+		dbus.service.Object.__init__(self, self.bus, "/")
+		if POLKIT:
+			try:
+				o = self.bus.get_object("org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority", True)
+				self.pk = dbus.proxies.Interface(o, "org.freedesktop.PolicyKit1.Authority")
+			except:
+				self.pk = None
+		else:
+			self.pk = None
+
+	def confirm_authorization(self, busname, action_id):
+		timer.reset()
+		if not POLKIT:
+			return
+		else:
+			if not self.pk:
+				raise dbus.DBusException("Blueman was built with PolicyKit-1 support, but it's not available on the system")
+
+		res = self.pk.CheckAuthorization(("system-bus-name", {"name": busname}),
+				     		  action_id, dbus.Dictionary({}, dbus.Signature("ss")), 0x1, "")
+					       
+		dprint(res)
+		(is_authorized, is_challenge, details) = res
+		if not is_authorized:
+			raise dbus.DBusException, "Not authorized"
+	
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="b", out_signature="", sender_keyword="caller")
+	def SetGN(self, enabled, caller):
+		timer.reset()
+		if enabled:	
+			p = subprocess.Popen(["/usr/sbin/avahi-autoipd", "-D", "pan0"], env=os.environ, bufsize=128)
+		else:
+			p = subprocess.Popen(["/usr/sbin/avahi-autoipd", "-k", "pan0"], bufsize=128)
+		
+		#reap the child
+		gobject.child_watch_add(p.pid, lambda pid, cond: 0)
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="b", out_signature="")
+	def SetRfkillState(self, state):		
+		from blueman.main.KillSwitchNG import KillSwitchNG
+		k = KillSwitchNG()
+		k.SetGlobalState(state)
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="sbs", out_signature="", sender_keyword="caller")
+
+	def NetworkSetup(self, ip_address, allow_nat, server_type, caller):
+		timer.reset()
+		dprint(ip_address, allow_nat, server_type)
+		if ip_address == "reload":
+			info = netstatus()
+			nc = None
+			if info["ip"] != "0" and not nc_is_running():
+				if info["type"] == "dnsmasq":
+					nc = NetConfDnsMasq(None)
+				elif info["type"] == "dhcpd":
+					nc = NetConfDhcpd(None)
+				
+				if nc:
+					nc.reload_settings()
+			
+			return
+		
+		self.confirm_authorization(caller, "org.blueman.network.setup")
+		if ip_address == "0":
+			info = netstatus()
+			nc = None
+			try:
+				if info["type"] == "dnsmasq":
+					nc = NetConfDnsMasq(None)
+				elif info["type"] == "dhcpd":
+					nc = NetConfDhcpd(None)
+			except:
+				#fallback
+				nc = NetConf(None)
+			
+			nc.uninstall()
+
+		else:
+			if ip_chk(ip_address):
+				nc = None
+				if server_type == "dnsmasq":
+					nc = NetConfDnsMasq(ip_address, allow_nat)
+				elif server_type == "dhcpd":
+					nc = NetConfDhcpd(ip_address, allow_nat)
+				if nc:
+					nc.install()
+
+			else:
+				return dbus.DBusException("IP Invalid")
+	
+	
+	def ppp_connected(self, ppp, port, ok, err):
+		ok(port)
+		timer.resume()
+		
+	def ppp_error(self, ppp, message, ok, err):
+		err(dbus.DBusException(message))
+		timer.resume()
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="sss", out_signature="s", sender_keyword="caller", async_callbacks=("ok", "err"))
+	def PPPConnect(self, port, number, apn, caller, ok, err):
+		timer.stop()
+		from blueman.main.PPPConnection import PPPConnection
+		
+		#self.confirm_authorization(caller, "org.blueman.network.setup")
+
+		ppp = PPPConnection(port, number, apn)
+		ppp.connect("error-occurred", self.ppp_error, ok, err)
+		ppp.connect("connected", self.ppp_connected, ok, err)
+		
+		ppp.Connect()
+		
+
+		
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="s", out_signature="s", sender_keyword="caller", async_callbacks=("ok", "err"))
+	def DhcpClient(self, net_interface, caller, ok, err):
+		timer.stop()
+
+		self.confirm_authorization(caller, "org.blueman.dhcp.client")
+		
+		from blueman.main.DhcpClient import DhcpClient
+		def dh_error(dh, message, ok, err):
+			err(message)
+			timer.resume()
+		
+		def dh_connected(dh, ip, ok, err):
+			ok(ip)
+			timer.resume()
+		
+		dh = DhcpClient(net_interface)
+		dh.connect("error-occurred", dh_error, ok, err)
+		dh.connect("connected", dh_connected, ok, err)		
+		try:
+			dh.Connect()
+		except Exception, e:
+			err(e)
+		
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="ss", out_signature="", async_callbacks=("ok", "err"))	
+	def HalRegisterModemPort(self, rfcomm_device, bd_addr, ok, err):
+		from blueman.main.HalManager import HalManager
+		timer.reset()
+		halmgr = HalManager()
+		dprint("** Registering modem")
+		halmgr.register(rfcomm_device, bd_addr, ok, err)
+
+	
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="s", out_signature="")
+	def HalUnregisterModemPortAddr(self, address):
+		from blueman.main.HalManager import HalManager
+		timer.reset()
+		halmgr = HalManager()
+		dprint("** Unregistering modem")
+		halmgr.unregister_addr(address)
+		
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="s", out_signature="")
+	def HalUnregisterModemPortDev(self, rfcomm_device):
+		from blueman.main.HalManager import HalManager
+		timer.reset()
+		halmgr = HalManager()
+		dprint("** Unregistering modem")
+		halmgr.unregister_dev(rfcomm_device)
+
+		
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="", out_signature="")
+	def HalRegisterNetDev(self, devicename):
+		from blueman.main.HalManager import HalManager
+		timer.reset()
+		halmgr = HalManager()
+		halmgr.register_netdev(devicename)
+		
+	@dbus.service.method(dbus_interface='org.blueman.Mechanism', in_signature="", out_signature="")
+	def DevRfkillChmod(self):
+		try:
+			os.chmod("/dev/rfkill", 0655)
+		except:
+			pass
+
+conf_service()
+loop.run()
+
