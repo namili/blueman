@@ -50,7 +50,7 @@ class Transfer(OdsManager):
 			
 		self.create_server("opp")
 		self.create_server("ftp")
-		
+		self.create_server("bip")
 		self.allowed_devices = []
 		
 	def __del__(self):
@@ -60,10 +60,15 @@ class Transfer(OdsManager):
 
 		if pattern == "opp":
 			if self.Config.props.opp_enabled:
-				OdsManager.create_server(self)
+				OdsManager.create_server(self,pattern="opp", require_pairing=False,obex_over_l2cap=False)
+				OdsManager.create_server(self,pattern="opp", require_pairing=False,obex_over_l2cap=True)
+		elif pattern == "bip":
+				OdsManager.create_server(self,pattern="bip", require_pairing=False,obex_over_l2cap=False)
+				OdsManager.create_server(self,pattern="bip", require_pairing=False,obex_over_l2cap=True)
 		elif pattern == "ftp":
 			if self.Config.props.ftp_enabled:
-				OdsManager.create_server(self, pattern="ftp", require_pairing=True)
+				OdsManager.create_server(self, pattern="ftp", require_pairing=True,obex_over_l2cap=False)
+				OdsManager.create_server(self, pattern="ftp", require_pairing=True,obex_over_l2cap=True)
 				
 				
 	def start_server(self, pattern):
@@ -77,6 +82,8 @@ class Transfer(OdsManager):
 					self.Config.props.shared_path = d
 			
 			if pattern == "opp":
+				server.Start(self.Config.props.shared_path, True, False)
+			if pattern == "bip":
 				server.Start(self.Config.props.shared_path, True, False)
 			elif pattern == "ftp":
 				if self.Config.props.ftp_allow_write == None:
@@ -100,7 +107,7 @@ class Transfer(OdsManager):
 
 	def on_session_created(self, server, session):
 		dprint(server.pattern, "session created")
-		if server.pattern != "opp":
+		if server.pattern != "opp" and server.pattern != "bip":
 			return	
 		
 		session.GHandle("transfer-progress", self.transfer_progress)

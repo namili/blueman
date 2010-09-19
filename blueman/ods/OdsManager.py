@@ -106,13 +106,13 @@ class OdsManager(OdsBase):
 		ref().Servers[pattern] = server
 		ref().emit("server-created", server, pattern)
 		
-	def create_server(self, source_addr="00:00:00:00:00:00", pattern="opp", require_pairing=False):
+	def create_server(self, source_addr="00:00:00:00:00:00", pattern="opp", require_pairing=False, obex_over_l2cap=False):
 		ref = weakref.ref(self)
 	
 		def err(*args):
 			dprint("Couldn't create %s server" % pattern, args)
 		
-		self.CreateBluetoothServer(source_addr, pattern, require_pairing, reply_handler=lambda x: OdsManager.__server_created(ref, x, pattern), error_handler=err)
+		self.CreateBluetoothServer(source_addr, pattern, require_pairing, obex_over_l2cap, reply_handler=lambda x: OdsManager.__server_created(ref, x, pattern), error_handler=err)
 		
 	def destroy_server(self, pattern="opp"):
 		dprint("Destroy %s server" % pattern)
